@@ -1,0 +1,63 @@
+{
+  "name": "neuradb",
+  "version": "1.0.0",
+  "description": "Lightweight In-Memory Vector Database for Fast Similarity Search",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "clean": "rimraf dist",
+    "prepublishOnly": "npm run clean && npm run build",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix"
+  },
+  "keywords": [
+    "vector",
+    "similarity",
+    "search",
+    "embedding",
+    "cosine",
+    "euclidean",
+    "dot-product",
+    "typescript",
+    "machine-learning",
+    "ai",
+    "semantic-search",
+    "vector-database",
+    "in-memory",
+    "zero-dependency"
+  ],
+  "author": "Haider Nakara <haider.nakara@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/haider-nakara/neuradb.git"
+  },
+  "bugs": {
+    "url": "https://github.com/haider-nakara/neuradb/issues"
+  },
+  "homepage": "https://github.com/haider-nakara/neuradb#readme",
+  "devDependencies": {
+    "@types/jest": "^29.5.5",
+    "@types/node": "^20.6.0",
+    "@typescript-eslint/eslint-plugin": "^6.7.0",
+    "@typescript-eslint/parser": "^6.7.0",
+    "eslint": "^8.49.0",
+    "jest": "^29.7.0",
+    "rimraf": "^5.0.1",
+    "ts-jest": "^29.1.1",
+    "typescript": "^5.2.2"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
