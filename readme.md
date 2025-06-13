@@ -131,13 +131,3 @@ Inspired by the simplicity of ChromaDB, Pinecone, and Faiss — with a developer
 ## 🔗 Contributing
 
 PRs, feature requests, and issues are welcome. Let's build better vector tooling together!
-
----
-
-Would you like me to also:
-
-- Prepare the NPM `package.json` boilerplate?
-- Scaffold a demo with example embeddings and queries?
-- Generate types and JSDocs for publishing?
-
-Let me know how far you want to go with this!
