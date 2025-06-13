@@ -123,7 +123,7 @@ export class VectorStore {
     } = options;
 
     if (this.documents.size === 0) {
-      return [];
+      throw new Error("Query embedding must be provided and non-empty");
     }
 
     if (!queryEmbedding || queryEmbedding.length === 0) {

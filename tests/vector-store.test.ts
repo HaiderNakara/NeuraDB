@@ -87,7 +87,7 @@ describe('VectorStore', () => {
     });
 
     test('should respect similarity threshold', () => {
-      const results = store.search([0.1, 0.2, 0.3], { threshold: 0.99 });
+      const results = store.search([1, 1, 1], { threshold: 0.99 });
       expect(results.length).toBe(0);
     });
   });
