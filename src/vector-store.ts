@@ -6,115 +6,515 @@ import {
   VectorStoreStats,
 } from "./interfaces/vector-store.interface";
 
+// OpenAI types
+interface OpenAIEmbeddingResponse {
+  data: Array<{
+    embedding: number[];
+    index: number;
+  }>;
+  model: string;
+  usage: {
+    prompt_tokens: number;
+    total_tokens: number;
+  };
+}
+
+interface OpenAIInstance {
+  embeddings: {
+    create: (params: {
+      input: string | string[];
+      model: string;
+    }) => Promise<OpenAIEmbeddingResponse>;
+  };
+}
+
+interface NeuraDBOptions {
+  openai?: OpenAIInstance;
+  embeddingModel?: string;
+  defaultBatchSize?: number;
+  batchDelay?: number;
+}
+
+interface DocumentWithOptionalEmbedding extends Omit<VectorDocument, 'embedding'> {
+  embedding?: number[];
+}
+
+interface AddDocumentsOptions {
+  createEmbedding?: boolean;
+  batchSize?: number;
+  batchDelay?: number;
+  onProgress?: (processed: number, total: number) => void;
+}
+
+interface SearchOptionsWithEmbedding extends Omit<SearchOptions, 'queryEmbedding'> {
+  queryEmbedding?: number[];
+}
+
 /**
  * VectorStore provides high-performance in-memory vector similarity search
- * with support for multiple similarity methods and document management.
+ * with support for multiple similarity methods, document management, and automatic OpenAI embeddings.
  * 
  * Features:
- * - Zero dependencies
+ * - Zero dependencies (OpenAI optional)
  * - Multiple similarity methods (cosine, euclidean, dot product)
+ * - Automatic embedding generation with OpenAI
  * - Metadata filtering
  * - TypeScript support
  * - Memory-efficient storage
  * 
  * @example
  * ```typescript
- * import { VectorStore } from 'vector-similarity-search';
+ * import { NeuraDB } from 'vector-similarity-search';
+ * import OpenAI from 'openai';
  * 
- * const store = new VectorStore();
+ * const openai = new OpenAI({ apiKey: 'your-api-key' });
+ * const store = new NeuraDB({ openai });
  * 
- * // Add documents with embeddings
- * store.addDocument({
+ * // Add documents with automatic embedding generation
+ * await store.addDocument({
  *   id: 'doc1',
  *   content: 'Hello world',
- *   embedding: [0.1, 0.2, 0.3],
  *   metadata: { category: 'greeting' }
- * });
+ * }, { createEmbedding: true });
  * 
- * // Search for similar documents
- * const results = store.search([0.1, 0.2, 0.3], {
+ * // Search with automatic query embedding
+ * const results = await store.search('Hello there', {
  *   limit: 5,
  *   threshold: 0.7,
  *   similarityMethod: 'cosine'
  * });
  * ```
  */
-export class VectorStore {
+export class NeuraDB {
   private documents: Map<string, VectorDocument> = new Map();
+  private openai?: OpenAIInstance;
+  private embeddingModel: string;
+  private defaultBatchSize: number = 10;
+  private batchDelay: number = 1000;
+
+  constructor(options: NeuraDBOptions = {}) {
+    this.openai = options.openai;
+    this.embeddingModel = options.embeddingModel || 'text-embedding-3-small';
+    this.defaultBatchSize = options.defaultBatchSize || 100;
+    this.batchDelay = options.batchDelay || 1000; // 1 second delay between batches
+  }
 
   /**
-   * Add a single document with pre-computed embedding
-   * @param document The document to add
+   * Generate embedding using OpenAI
+   * @param text Text to embed
+   * @returns Embedding vector
+   * @throws Error if OpenAI instance is not provided
+   */
+  async generateEmbedding(text: string): Promise<number[]> {
+    if (!this.openai) {
+      throw new Error('OpenAI instance is required for embedding generation. Please provide it in constructor.');
+    }
+
+    try {
+      const response = await this.openai.embeddings.create({
+        input: text,
+        model: this.embeddingModel,
+      });
+
+      return response.data[0].embedding;
+    } catch (error) {
+      throw new Error(`Failed to generate embedding: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Generate embeddings for multiple texts using OpenAI with batch processing
+   * @param texts Array of texts to embed
+   * @param batchSize Number of texts to process in each batch
+   * @param batchDelay Delay between batches in milliseconds
+   * @returns Array of embedding vectors
+   * @throws Error if OpenAI instance is not provided
+   */
+  async generateEmbeddings(
+    texts: string[],
+    batchSize: number = this.defaultBatchSize,
+    batchDelay: number = this.batchDelay
+  ): Promise<number[][]> {
+    if (!this.openai) {
+      throw new Error('OpenAI instance is required for embedding generation. Please provide it in constructor.');
+    }
+
+    if (texts.length === 0) {
+      return [];
+    }
+
+    // For small batches, process all at once
+    if (texts.length <= batchSize) {
+      try {
+        const response = await this.openai.embeddings.create({
+          input: texts,
+          model: this.embeddingModel,
+        });
+
+        return response.data
+          .sort((a, b) => a.index - b.index)
+          .map(item => item.embedding);
+      } catch (error) {
+        throw new Error(`Failed to generate embeddings: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    }
+
+    // For large batches, process in chunks
+    const allEmbeddings: number[][] = [];
+    const batches = this.chunkArray(texts, batchSize);
+
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+
+      try {
+        const response = await this.openai.embeddings.create({
+          input: batch,
+          model: this.embeddingModel,
+        });
+
+        const batchEmbeddings = response.data
+          .sort((a, b) => a.index - b.index)
+          .map(item => item.embedding);
+
+        allEmbeddings.push(...batchEmbeddings);
+
+        // Add delay between batches (except for the last batch)
+        if (i < batches.length - 1 && batchDelay > 0) {
+          await this.delay(batchDelay);
+        }
+
+      } catch (error) {
+        throw new Error(`Failed to generate embeddings for batch ${i + 1}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    }
+
+    return allEmbeddings;
+  }
+
+  /**
+   * Add a single document with pre-computed embedding or generate embedding automatically
+   * @param document The document to add (embedding optional if createEmbedding is true)
+   * @param options Options for document addition
    * @throws Error if document doesn't have a valid embedding or dimensions don't match
    * @example
    * ```typescript
+   * // With pre-computed embedding
    * store.addDocument({
    *   id: 'doc1',
    *   content: 'Sample text',
    *   embedding: [0.1, 0.2, 0.3],
    *   metadata: { type: 'article' }
    * });
+   * 
+   * // With automatic embedding generation
+   * await store.addDocument({
+   *   id: 'doc2',
+   *   content: 'Another text',
+   *   metadata: { type: 'article' }
+   * }, { createEmbedding: true });
    * ```
    */
-  addDocument(document: VectorDocument): void {
-    this.validateDocument(document);
+  async addDocument(
+    document: DocumentWithOptionalEmbedding,
+    options: { createEmbedding?: boolean } = {}
+  ): Promise<void> {
+    let finalDocument: VectorDocument;
 
-    if (!this.validateEmbeddingDimensions(document.embedding)) {
+    if (options.createEmbedding && !document.embedding) {
+      if (!document.content) {
+        throw new Error('Document must have content when createEmbedding is true');
+      }
+
+      const embedding = await this.generateEmbedding(document.content);
+      finalDocument = {
+        ...document,
+        embedding,
+      } as VectorDocument;
+    } else if (document.embedding) {
+      finalDocument = document as VectorDocument;
+    } else {
+      throw new Error('Document must have an embedding or createEmbedding must be true');
+    }
+
+    this.validateDocument(finalDocument);
+
+    // At this point finalDocument is validated and must have embedding
+    if (!this.validateEmbeddingDimensions(finalDocument.embedding!)) {
       throw new Error(
-        `Document embedding dimensions (${document.embedding.length}) don't match existing documents (${this.getEmbeddingDimensions()})`
+        `Document embedding dimensions (${finalDocument.embedding!.length}) don't match existing documents (${this.getEmbeddingDimensions()})`
       );
     }
 
     const now = new Date();
     const documentWithTimestamps: VectorDocument = {
-      ...document,
-      createdAt: document.createdAt || now,
+      ...finalDocument,
+      createdAt: finalDocument.createdAt || now,
       updatedAt: now,
     };
 
-    this.documents.set(document.id, documentWithTimestamps);
+    this.documents.set(finalDocument.id, documentWithTimestamps);
   }
 
   /**
-   * Add multiple documents with pre-computed embeddings
+   * Add multiple documents with pre-computed embeddings or generate embeddings automatically
    * @param documents Array of documents to add
+   * @param options Options for document addition including batch processing
    * @throws Error if any document doesn't have a valid embedding
    * @example
    * ```typescript
-   * store.addDocuments([
-   *   { id: '1', content: 'Text 1', embedding: [0.1, 0.2] },
-   *   { id: '2', content: 'Text 2', embedding: [0.3, 0.4] }
-   * ]);
+   * // With automatic embedding generation and batch processing
+   * await store.addDocuments([
+   *   { id: '1', content: 'Text 1' },
+   *   { id: '2', content: 'Text 2' }
+   * ], { 
+   *   createEmbedding: true,
+   *   batchSize: 50,
+   *   batchDelay: 500,
+   *   onProgress: (processed, total) => console.log(`${processed}/${total}`)
+   * });
    * ```
    */
-  addDocuments(documents: VectorDocument[]): void {
-    // Validate all documents first
-    documents.forEach((doc) => this.validateDocument(doc));
+  async addDocuments(
+    documents: DocumentWithOptionalEmbedding[],
+    options: AddDocumentsOptions = {}
+  ): Promise<void> {
+    const {
+      createEmbedding = false,
+      batchSize = this.defaultBatchSize,
+      batchDelay = this.batchDelay,
+      onProgress
+    } = options;
 
-    // Add all documents
-    documents.forEach((doc) => this.addDocument(doc));
+    if (documents.length === 0) {
+      return;
+    }
+
+    // Validate input documents early
+    documents.forEach((doc, index) => {
+      if (!doc.id || typeof doc.id !== 'string' || doc.id.trim() === '') {
+        throw new Error(`Document at index ${index} must have a valid non-empty ID`);
+      }
+
+      // Check for duplicate IDs in the input array
+      const duplicateIndex = documents.findIndex((otherDoc, otherIndex) =>
+        otherIndex !== index && otherDoc.id === doc.id
+      );
+      if (duplicateIndex !== -1) {
+        throw new Error(`Duplicate document ID '${doc.id}' found at indices ${index} and ${duplicateIndex}`);
+      }
+
+      // Check if document already exists in store
+      if (this.documents.has(doc.id)) {
+        throw new Error(`Document with ID '${doc.id}' already exists in store`);
+      }
+
+      if (createEmbedding) {
+        if (!doc.embedding && (!doc.content || typeof doc.content !== 'string' || doc.content.trim() === '')) {
+          throw new Error(
+            `Document at index ${index} (ID: ${doc.id}) must have non-empty content when createEmbedding is true`
+          );
+        }
+      } else {
+        if (!doc.embedding || !Array.isArray(doc.embedding) || doc.embedding.length === 0) {
+          throw new Error(
+            `Document at index ${index} (ID: ${doc.id}) must have a valid embedding array when createEmbedding is false`
+          );
+        }
+
+        // Validate embedding values
+        if (doc.embedding.some(val => typeof val !== 'number' || !isFinite(val))) {
+          throw new Error(
+            `Document at index ${index} (ID: ${doc.id}) has invalid embedding values. All values must be finite numbers`
+          );
+        }
+
+        // Check embedding dimensions consistency
+        const expectedDim = this.getEmbeddingDimensions();
+        if (expectedDim !== null && doc.embedding.length !== expectedDim) {
+          throw new Error(
+            `Document at index ${index} (ID: ${doc.id}) embedding dimensions (${doc.embedding.length}) don't match existing documents (${expectedDim})`
+          );
+        }
+      }
+    });
+
+    let finalDocuments: VectorDocument[];
+
+    if (createEmbedding) {
+      // Separate documents that need embeddings vs those that already have them
+      const documentsNeedingEmbeddings: DocumentWithOptionalEmbedding[] = [];
+      const documentsWithEmbeddings: VectorDocument[] = [];
+
+      documents.forEach((doc) => {
+        if (!doc.embedding) {
+          documentsNeedingEmbeddings.push(doc);
+        } else {
+          // Validate existing embedding
+          if (!Array.isArray(doc.embedding) || doc.embedding.length === 0) {
+            throw new Error(`Document ${doc.id} has invalid embedding array`);
+          }
+
+          if (doc.embedding.some(val => typeof val !== 'number' || !isFinite(val))) {
+            throw new Error(`Document ${doc.id} has invalid embedding values`);
+          }
+
+          // Check dimensions
+          const expectedDim = this.getEmbeddingDimensions();
+          if (expectedDim !== null && doc.embedding.length !== expectedDim) {
+            throw new Error(
+              `Document ${doc.id} embedding dimensions (${doc.embedding.length}) don't match existing documents (${expectedDim})`
+            );
+          }
+
+          documentsWithEmbeddings.push(doc as VectorDocument);
+        }
+      });
+
+      // Generate embeddings for documents that need them
+      let generatedEmbeddings: number[][] = [];
+      if (documentsNeedingEmbeddings.length > 0) {
+        const textsToEmbed = documentsNeedingEmbeddings.map(doc => doc.content!);
+
+        try {
+          if (onProgress) {
+            // Process with progress tracking
+            const batches = this.chunkArray(textsToEmbed, batchSize);
+            let processedCount = 0;
+            const totalToProcess = documentsNeedingEmbeddings.length;
+
+            for (let i = 0; i < batches.length; i++) {
+              const batch = batches[i];
+
+              try {
+                const batchEmbeddings = await this.generateEmbeddings(batch, batch.length, 0);
+                generatedEmbeddings.push(...batchEmbeddings);
+
+                processedCount += batch.length;
+                onProgress(processedCount, totalToProcess);
+
+                // Add delay between batches (except for the last batch)
+                if (i < batches.length - 1 && batchDelay > 0) {
+                  await this.delay(batchDelay);
+                }
+              } catch (error) {
+                throw new Error(
+                  `Failed to generate embeddings for batch ${i + 1} (documents ${processedCount + 1}-${processedCount + batch.length}): ${error instanceof Error ? error.message : 'Unknown error'
+                  }`
+                );
+              }
+            }
+          } else {
+            // Process without progress tracking
+            generatedEmbeddings = await this.generateEmbeddings(textsToEmbed, batchSize, batchDelay);
+          }
+        } catch (error) {
+          throw new Error(`Failed to generate embeddings: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+      }
+
+      // Validate generated embeddings dimensions
+      if (generatedEmbeddings.length > 0) {
+        const expectedDim = this.getEmbeddingDimensions();
+        const firstEmbeddingDim = generatedEmbeddings[0].length;
+
+        if (expectedDim !== null && firstEmbeddingDim !== expectedDim) {
+          throw new Error(
+            `Generated embedding dimensions (${firstEmbeddingDim}) don't match existing documents (${expectedDim})`
+          );
+        }
+
+        // Check all generated embeddings have consistent dimensions
+        if (generatedEmbeddings.some(emb => emb.length !== firstEmbeddingDim)) {
+          throw new Error('Generated embeddings have inconsistent dimensions');
+        }
+      }
+
+      // Combine documents with their embeddings
+      const docsWithNewEmbeddings = documentsNeedingEmbeddings.map((doc, index) => ({
+        ...doc,
+        embedding: generatedEmbeddings[index],
+      })) as VectorDocument[];
+
+      finalDocuments = [...documentsWithEmbeddings, ...docsWithNewEmbeddings];
+    } else {
+      // All documents should already have embeddings (validated above)
+      finalDocuments = documents as VectorDocument[];
+    }
+
+    // Final validation and dimension consistency check
+    const expectedDim = this.getEmbeddingDimensions();
+    const now = new Date();
+
+    // Check dimension consistency across all documents to be added
+    if (finalDocuments.length > 0) {
+      const firstDocDim = finalDocuments[0].embedding!.length;
+
+      // Check consistency within the batch
+      for (let i = 1; i < finalDocuments.length; i++) {
+        if (finalDocuments[i].embedding!.length !== firstDocDim) {
+          throw new Error(
+            `Inconsistent embedding dimensions in batch: document ${finalDocuments[0].id} has ${firstDocDim} dimensions, but document ${finalDocuments[i].id} has ${finalDocuments[i].embedding!.length} dimensions`
+          );
+        }
+      }
+
+      // Check consistency with existing documents
+      if (expectedDim !== null && firstDocDim !== expectedDim) {
+        throw new Error(
+          `Batch embedding dimensions (${firstDocDim}) don't match existing documents (${expectedDim})`
+        );
+      }
+    }
+
+    // Add all documents to the store
+    try {
+      finalDocuments.forEach(doc => {
+        const documentWithTimestamps: VectorDocument = {
+          ...doc,
+          createdAt: doc.createdAt || now,
+          updatedAt: now,
+        };
+
+        this.documents.set(doc.id, documentWithTimestamps);
+      });
+    } catch (error) {
+      // Rollback any documents that were added before the error
+      finalDocuments.forEach(doc => {
+        this.documents.delete(doc.id);
+      });
+
+      throw new Error(`Failed to add documents to store: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   /**
    * Search for similar documents using vector similarity
-   * @param queryEmbedding The query vector embedding
+   * @param query The query (can be embedding vector or text string)
    * @param options Search configuration options
    * @returns Array of search results sorted by similarity (highest first)
-   * @throws Error if query embedding is invalid
+   * @throws Error if query is invalid
    * @example
    * ```typescript
+   * // Search with pre-computed embedding
    * const results = store.search([0.1, 0.2, 0.3], {
    *   limit: 10,
    *   threshold: 0.5,
    *   similarityMethod: 'cosine',
    *   metadataFilter: { category: 'news' }
    * });
+   * 
+   * // Search with text query (automatic embedding)
+   * const results = await store.search('Hello world', {
+   *   limit: 10,
+   *   threshold: 0.5,
+   *   similarityMethod: 'cosine'
+   * });
    * ```
    */
-  search(
-    queryEmbedding: number[],
+  async search(
+    query: number[] | string,
     options: SearchOptions = {}
-  ): SearchResult[] {
+  ): Promise<SearchResult[]> {
     const {
       limit = 10,
       threshold = 0,
@@ -123,11 +523,23 @@ export class VectorStore {
     } = options;
 
     if (this.documents.size === 0) {
-      throw new Error("Query embedding must be provided and non-empty");
+      return [];
     }
 
-    if (!queryEmbedding || queryEmbedding.length === 0) {
-      throw new Error("Query embedding must be provided and non-empty");
+    let queryEmbedding: number[];
+
+    // Handle different query types
+    if (typeof query === 'string') {
+      // Generate embedding for text query
+      queryEmbedding = await this.generateEmbedding(query);
+    } else if (Array.isArray(query)) {
+      // Use provided embedding
+      if (query.length === 0) {
+        throw new Error("Query embedding must be provided and non-empty");
+      }
+      queryEmbedding = query;
+    } else {
+      throw new Error("Query must be either a string or number array");
     }
 
     const results: SearchResult[] = [];
@@ -142,7 +554,7 @@ export class VectorStore {
       try {
         const similarity = this.calculateSimilarity(
           queryEmbedding,
-          document.embedding,
+          document.embedding!,
           similarityMethod
         );
 
@@ -163,22 +575,22 @@ export class VectorStore {
 
   /**
    * Find the most similar document to the query
-   * @param queryEmbedding The query vector embedding
+   * @param query The query (can be embedding vector or text string)
    * @param similarityMethod Similarity calculation method
    * @returns Most similar document or null if none found
    * @example
    * ```typescript
-   * const mostSimilar = store.findMostSimilar([0.1, 0.2, 0.3], 'cosine');
+   * const mostSimilar = await store.findMostSimilar('Hello world', 'cosine');
    * if (mostSimilar) {
    *   console.log(`Most similar: ${mostSimilar.document.content}`);
    * }
    * ```
    */
-  findMostSimilar(
-    queryEmbedding: number[],
+  async findMostSimilar(
+    query: number[] | string,
     similarityMethod: SimilarityMethod = "cosine"
-  ): SearchResult | null {
-    const results = this.search(queryEmbedding, { limit: 1, similarityMethod });
+  ): Promise<SearchResult | null> {
+    const results = await this.search(query, { limit: 1, similarityMethod });
     return results.length > 0 ? results[0] : null;
   }
 
@@ -211,31 +623,53 @@ export class VectorStore {
 
   /**
    * Update an existing document
-   * @param document Updated document
+   * @param document Updated document (embedding optional if createEmbedding is true)
+   * @param options Options for document update
    * @returns True if document was updated, false if not found
    * @throws Error if document doesn't have a valid embedding
    */
-  updateDocument(document: VectorDocument): boolean {
+  async updateDocument(
+    document: DocumentWithOptionalEmbedding,
+    options: { createEmbedding?: boolean } = {}
+  ): Promise<boolean> {
     if (!this.documents.has(document.id)) {
       return false;
     }
 
-    this.validateDocument(document);
+    let finalDocument: VectorDocument;
 
-    if (!this.validateEmbeddingDimensions(document.embedding)) {
+    if (options.createEmbedding && !document.embedding) {
+      if (!document.content) {
+        throw new Error('Document must have content when createEmbedding is true');
+      }
+
+      const embedding = await this.generateEmbedding(document.content);
+      finalDocument = {
+        ...document,
+        embedding,
+      } as VectorDocument;
+    } else if (document.embedding) {
+      finalDocument = document as VectorDocument;
+    } else {
+      throw new Error('Document must have an embedding or createEmbedding must be true');
+    }
+
+    this.validateDocument(finalDocument);
+
+    if (!this.validateEmbeddingDimensions(finalDocument.embedding!)) {
       throw new Error(
-        `Document embedding dimensions (${document.embedding.length}) don't match existing documents (${this.getEmbeddingDimensions()})`
+        `Document embedding dimensions (${finalDocument.embedding!.length}) don't match existing documents (${this.getEmbeddingDimensions()})`
       );
     }
 
-    const existingDoc = this.documents.get(document.id)!;
+    const existingDoc = this.documents.get(finalDocument.id)!;
     const updatedDocument: VectorDocument = {
-      ...document,
+      ...finalDocument,
       createdAt: existingDoc.createdAt,
       updatedAt: new Date(),
     };
 
-    this.documents.set(document.id, updatedDocument);
+    this.documents.set(finalDocument.id, updatedDocument);
     return true;
   }
 
@@ -289,7 +723,7 @@ export class VectorStore {
    */
   getEmbeddingDimensions(): number | null {
     const firstDoc = Array.from(this.documents.values())[0];
-    return firstDoc ? firstDoc.embedding.length : null;
+    return firstDoc ? firstDoc.embedding!.length : null;
   }
 
   /**
@@ -303,7 +737,7 @@ export class VectorStore {
     // Estimate memory usage
     let estimatedMemoryUsage = 0;
     for (const doc of this.documents.values()) {
-      estimatedMemoryUsage += doc.embedding.length * 8; // 8 bytes per number
+      estimatedMemoryUsage += doc.embedding!.length * 8; // 8 bytes per number
       estimatedMemoryUsage += doc.content.length * 2; // 2 bytes per character (UTF-16)
       estimatedMemoryUsage += JSON.stringify(doc.metadata || {}).length * 2;
       estimatedMemoryUsage += 100; // Overhead for object structure
@@ -316,12 +750,92 @@ export class VectorStore {
     };
   }
 
+  /**
+   * Check if OpenAI instance is available
+   * @returns True if OpenAI instance is configured
+   */
+  hasOpenAI(): boolean {
+    return !!this.openai;
+  }
+
+  /**
+   * Get current embedding model name
+   * @returns Embedding model name
+   */
+  getEmbeddingModel(): string {
+    return this.embeddingModel;
+  }
+
+  /**
+   * Set embedding model name
+   * @param model New embedding model name
+   */
+  setEmbeddingModel(model: string): void {
+    this.embeddingModel = model;
+  }
+
+  /**
+   * Get default batch size for embedding operations
+   * @returns Default batch size
+   */
+  getDefaultBatchSize(): number {
+    return this.defaultBatchSize;
+  }
+
+  /**
+   * Set default batch size for embedding operations
+   * @param batchSize New default batch size
+   */
+  setDefaultBatchSize(batchSize: number): void {
+    if (batchSize <= 0) {
+      throw new Error('Batch size must be greater than 0');
+    }
+    this.defaultBatchSize = batchSize;
+  }
+
+  /**
+   * Get default batch delay
+   * @returns Default batch delay in milliseconds
+   */
+  getDefaultBatchDelay(): number {
+    return this.batchDelay;
+  }
+
+  /**
+   * Set default batch delay
+   * @param delay New default batch delay in milliseconds
+   */
+  setDefaultBatchDelay(delay: number): void {
+    if (delay < 0) {
+      throw new Error('Batch delay cannot be negative');
+    }
+    this.batchDelay = delay;
+  }
+
   // Private methods
+
+  /**
+   * Split array into chunks of specified size
+   */
+  private chunkArray<T>(array: T[], chunkSize: number): T[][] {
+    const chunks: T[][] = [];
+    for (let i = 0; i < array.length; i += chunkSize) {
+      chunks.push(array.slice(i, i + chunkSize));
+    }
+    return chunks;
+  }
+
+  /**
+   * Delay execution for specified milliseconds
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
 
   /**
    * Validate document structure and embedding
    */
-  private validateDocument(document: VectorDocument): void {
+  private validateDocument(document: VectorDocument): boolean {
     if (!document.id) {
       throw new Error("Document must have an ID");
     }
@@ -333,6 +847,8 @@ export class VectorStore {
     if (document.embedding.some(val => typeof val !== 'number' || !isFinite(val))) {
       throw new Error("All embedding values must be finite numbers");
     }
+
+    return true;
   }
 
   /**

@@ -1,6 +1,6 @@
 {
   "name": "neuradb",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "description": "Lightweight In-Memory Vector Database for Fast Similarity Search",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

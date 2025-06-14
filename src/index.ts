@@ -1,4 +1,4 @@
-export { VectorStore } from "./vector-store";
+export { NeuraDB } from "./vector-store";
 
 export type {
   VectorDocument,
@@ -8,4 +8,4 @@ export type {
   VectorStoreStats,
 } from "./interfaces/vector-store.interface";
 
-export { VectorStore as default } from "./vector-store";
+export { NeuraDB as default } from "./vector-store";
