@@ -66,6 +66,15 @@ describe('VectorStore', () => {
         content: 'Different content',
         embedding: [0.2, 0.3, 0.4]
       });
+      // Add more documents for pagination
+      for (let i = 3; i <= 7; i++) {
+        store.addDocument({
+          ...sampleDocument,
+          id: `doc${i}`,
+          content: `Content ${i}`,
+          embedding: [0.1 * i, 0.2 * i, 0.3 * i],
+        });
+      }
     });
 
     test('should find most similar document', async () => {
@@ -75,8 +84,12 @@ describe('VectorStore', () => {
     });
 
     test('should filter by metadata', async () => {
+      console.log(store.getAllDocuments());
+
       const results = await store.search([0.1, 0.2, 0.3], {
-        metadataFilter: { category: 'greeting' }
+        metadataFilter: { category: 'greeting' },
+        page: 2,
+        pageSize: 2
       });
       expect(results.length).toBe(2);
       expect(results[0].document.metadata?.category).toBe('greeting');
@@ -89,6 +102,27 @@ describe('VectorStore', () => {
 
     test('should respect similarity threshold', async () => {
       const results = await store.search([1, 1, 1], { threshold: 0.99 });
+      expect(results.length).toBe(0);
+    });
+
+    test('should paginate search results', async () => {
+      // All docs are similar, so all will be returned if no limit
+      const pageSize = 2;
+      // Page 1
+      let results = await store.search([0.1, 0.2, 0.3], { page: 1, pageSize });
+      expect(results.length).toBe(2);
+      expect(results[0].document.id).toBeDefined();
+      // Page 2
+      results = await store.search([0.1, 0.2, 0.3], { page: 2, pageSize });
+      expect(results.length).toBe(2);
+      // Page 3
+      results = await store.search([0.1, 0.2, 0.3], { page: 3, pageSize });
+      expect(results.length).toBe(2);
+      // Page 4 (should have 1 doc left)
+      results = await store.search([0.1, 0.2, 0.3], { page: 4, pageSize });
+      expect(results.length).toBe(1);
+      // Page 5 (should be empty)
+      results = await store.search([0.1, 0.2, 0.3], { page: 5, pageSize });
       expect(results.length).toBe(0);
     });
   });

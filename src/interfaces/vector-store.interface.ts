@@ -52,6 +52,12 @@ export interface SearchOptions {
 
   /** Metadata filters to apply */
   metadataFilter?: Record<string, any>;
+
+  /** Page number for pagination (1-based) */
+  page?: number;
+
+  /** Page size for pagination */
+  pageSize?: number;
 }
 
 /**

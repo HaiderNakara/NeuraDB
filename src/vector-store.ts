@@ -520,6 +520,8 @@ export class NeuraDB {
       threshold = 0,
       similarityMethod = "cosine",
       metadataFilter,
+      page = 1,
+      pageSize,
     } = options;
 
     if (this.documents.size === 0) {
@@ -567,10 +569,19 @@ export class NeuraDB {
       }
     }
 
-    // Sort by similarity (highest first) and limit results
-    return results
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, limit);
+    // Sort by similarity (highest first)
+    const sortedResults = results.sort((a, b) => b.similarity - a.similarity);
+
+    // Pagination logic
+    let paginatedResults = sortedResults;
+    if (pageSize !== undefined) {
+      const startIdx = (page - 1) * pageSize;
+      paginatedResults = sortedResults.slice(startIdx, startIdx + pageSize);
+    } else {
+      paginatedResults = sortedResults.slice(0, limit);
+    }
+
+    return paginatedResults;
   }
 
   /**
