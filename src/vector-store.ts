@@ -947,4 +947,88 @@ export class NeuraDB {
   private dotProductSimilarity(vecA: number[], vecB: number[]): number {
     return vecA.reduce((sum, a, i) => sum + a * vecB[i], 0);
   }
+
+  /**
+   * Search for similar documents with pagination metadata
+   * @param query The query (can be embedding vector or text string)
+   * @param options Search configuration options (must include pageSize)
+   * @returns Object with data (results), page, pageSize, totalResults, totalPages
+   */
+  async searchWithPagination(
+    query: number[] | string,
+    options: SearchOptions = {}
+  ): Promise<{
+    data: SearchResult[];
+    page: number;
+    pageSize: number;
+    totalResults: number;
+    totalPages: number;
+  }> {
+    const {
+      page = 1,
+      pageSize = 10,
+      threshold = 0,
+      similarityMethod = "cosine",
+      metadataFilter,
+    } = options;
+
+    if (this.documents.size === 0) {
+      return {
+        data: [],
+        page,
+        pageSize,
+        totalResults: 0,
+        totalPages: 0,
+      };
+    }
+
+    let queryEmbedding: number[];
+    if (typeof query === 'string') {
+      queryEmbedding = await this.generateEmbedding(query);
+    } else if (Array.isArray(query)) {
+      if (query.length === 0) {
+        throw new Error("Query embedding must be provided and non-empty");
+      }
+      queryEmbedding = query;
+    } else {
+      throw new Error("Query must be either a string or number array");
+    }
+
+    let documentsToSearch = Array.from(this.documents.values());
+    if (metadataFilter) {
+      documentsToSearch = this.filterByMetadata(documentsToSearch, metadataFilter);
+    }
+
+    const results: SearchResult[] = [];
+    for (const document of documentsToSearch) {
+      try {
+        const similarity = this.calculateSimilarity(
+          queryEmbedding,
+          document.embedding!,
+          similarityMethod
+        );
+        if (similarity >= threshold) {
+          results.push({ document, similarity });
+        }
+      } catch (error) {
+        console.warn(`Skipping document ${document.id}: ${error}`);
+        continue;
+      }
+    }
+
+    // Sort by similarity (highest first)
+    const sortedResults = results.sort((a, b) => b.similarity - a.similarity);
+    const totalResults = sortedResults.length;
+    const totalPages = Math.ceil(totalResults / pageSize);
+    const startIdx = (page - 1) * pageSize;
+    const data = sortedResults.slice(startIdx, startIdx + pageSize);
+
+    return {
+      data,
+      page,
+      pageSize,
+      totalResults,
+      totalPages,
+    };
+  }
 }
